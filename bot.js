@@ -70,6 +70,7 @@ const DEFAULT_CONFIG = {
   invite_channel_id: null,
   invite_text: "Join our server!",
   automsg_roles: [],
+  blacklisted_users: [],
 };
 
 function loadConfig() {
@@ -736,6 +737,13 @@ client.on("messageCreate", async (message) => {
   const args    = message.content.slice(PREFIX.length).trim().split(/\s+/);
   const command = args.shift().toLowerCase();
   const member  = message.member;
+
+  // Blacklist guard — silently block blacklisted users (admins bypass)
+  {
+    const _cfg = loadConfig();
+    const _bl  = (_cfg.blacklisted_users || []);
+    if (_bl.includes(member.id) && !isAdmin(member)) return;
+  }
 
   // Admin guard helper
   function requireAdmin() {
@@ -2306,6 +2314,68 @@ client.on("messageCreate", async (message) => {
   }
 
   // ==========================================================================
+  // BLACKLIST COMMAND
+  // ==========================================================================
+
+  // .blacklist [add|remove|list] [@user] [reason]
+  if (command === "blacklist") {
+    if (!requireAdmin()) return;
+    const cfg2 = loadConfig();
+    cfg2.blacklisted_users = cfg2.blacklisted_users || [];
+
+    const sub    = args[0]?.toLowerCase();
+    const target = message.mentions.members.first();
+
+    // .blacklist (no args) or .blacklist list
+    if (!sub || sub === "list") {
+      const list = cfg2.blacklisted_users;
+      if (list.length === 0) {
+        return message.reply({ embeds: [new EmbedBuilder().setTitle("🚫  Blacklist").setDescription("No users are blacklisted.").setColor(Colors.Blurple)] });
+      }
+      const embed = new EmbedBuilder()
+        .setTitle(`🚫  Blacklisted Users (${list.length})`)
+        .setColor(Colors.Red);
+      const lines = list.map((entry) => `<@${entry.userId}> (\`${entry.userId}\`) — ${entry.reason} — <t:${Math.floor(entry.addedAt / 1000)}:R>`);
+      embed.setDescription(lines.join("\n").slice(0, 4000));
+      return message.reply({ embeds: [embed] });
+    }
+
+    if (sub === "add") {
+      if (!target) return message.reply({ embeds: [errEmbed("Mention a user to blacklist.")] });
+      if (isAdmin(target)) return message.reply({ embeds: [errEmbed("You cannot blacklist an admin.")] });
+      if (cfg2.blacklisted_users.some((e) => e.userId === target.id)) {
+        return message.reply({ embeds: [errEmbed(`<@${target.id}> is already blacklisted.`)] });
+      }
+      const reason = args.slice(2).join(" ") || "No reason provided";
+      cfg2.blacklisted_users.push({ userId: target.id, reason, addedAt: Date.now(), addedBy: member.id });
+      saveConfig(cfg2);
+      const embed = new EmbedBuilder()
+        .setTitle("🚫  User Blacklisted")
+        .setColor(Colors.Red)
+        .setTimestamp()
+        .addFields(
+          { name: "User",     value: `<@${target.id}> (\`${target.user.tag}\`)`, inline: true },
+          { name: "By",       value: `<@${member.id}>`,                           inline: true },
+          { name: "Reason",   value: reason,                                      inline: false }
+        );
+      return message.reply({ embeds: [embed] });
+    }
+
+    if (sub === "remove") {
+      if (!target) return message.reply({ embeds: [errEmbed("Mention a user to unblacklist.")] });
+      const before = cfg2.blacklisted_users.length;
+      cfg2.blacklisted_users = cfg2.blacklisted_users.filter((e) => e.userId !== target.id);
+      if (cfg2.blacklisted_users.length === before) {
+        return message.reply({ embeds: [errEmbed(`<@${target.id}> is not blacklisted.`)] });
+      }
+      saveConfig(cfg2);
+      return message.reply({ embeds: [okEmbed(`<@${target.id}> has been removed from the blacklist.`)] });
+    }
+
+    return message.reply({ embeds: [errEmbed("Usage: `.blacklist add @user [reason]` / `.blacklist remove @user` / `.blacklist list`")] });
+  }
+
+  // ==========================================================================
   // AUTO-MESSAGE COMMANDS
   // ==========================================================================
 
@@ -2523,14 +2593,24 @@ client.on("messageCreate", async (message) => {
       automsg: {
         title: "📨  Auto-Message & JoinVC Commands",
         fields: [
-          [`\`${p}automsg\``,              "Start an auto-message session (bot DMs you for setup)"],
-          [`\`${p}joinvc\``,              "Join a voice channel via user token (bot DMs you for setup)"],
-          [`\`${p}stopmsg <id>\``,         "Stop an active auto-message or JoinVC session"],
+          [`\`${p}automsg\``,              "Start an auto-message session — bot DMs you for setup"],
+          [`\`${p}joinvc\``,               "Join a voice channel via user token — bot DMs you for setup"],
+          [`\`${p}stopmsg <id>\``,         "Stop an active session by its ID"],
           [`\`${p}sessions\``,             "List your active sessions (admins see all)"],
-          ["**Mode 1**",                   "10 messages spread evenly over 10 minutes, then stops"],
-          ["**Mode 2**",                   "3 messages per minute, runs 24/7 until stopped"],
-          ["**Daily limits**",             "Admins set per-role limits with `.setup automsg_role @role <n>`"],
-          ["**Setup**",                    "`.setup automsg_role @role <daily_limit>`\n`.setup rm_automsg_role @role`\n`.setup automsg_roles` — list configured roles"],
+          ["**Mode 1**",                   "10 messages spread over 10 minutes, then stops automatically"],
+          ["**Mode 2**",                   "3 messages per minute — runs 24/7 until you stop it"],
+          ["**How to start**",             "1. Type `.automsg` in the server\n2. Bot opens your DMs\n3. Answer each step\n4. Session starts and gives you an ID"],
+          ["**Role access**",              "Admins can always use it. Others need: `.setup automsg_role @role <daily_limit>`"],
+          ["**Setup**",                    "`.setup automsg_role @role <n>` — grant access\n`.setup rm_automsg_role @role` — revoke\n`.setup automsg_roles` — list"],
+        ],
+      },
+      blacklist: {
+        title: "🚫  Blacklist Commands",
+        fields: [
+          [`\`${p}blacklist add @user [reason]\``, "Block a user from using any bot commands (admin)"],
+          [`\`${p}blacklist remove @user\``,        "Remove a user from the blacklist (admin)"],
+          [`\`${p}blacklist list\``,                "Show all blacklisted users (admin)"],
+          ["**Note**",                              "Blacklisted users are silently ignored — no error message shown. Admins are immune to blacklisting."],
         ],
       },
     };
@@ -2545,11 +2625,12 @@ client.on("messageCreate", async (message) => {
     const embed = new EmbedBuilder()
       .setTitle("📖  Bot Help")
       .setDescription(
-        `\`${p}help mod\`     — Moderation commands\n` +
-        `\`${p}help info\`    — Info & lookup commands\n` +
-        `\`${p}help util\`    — Utility & fun commands\n` +
-        `\`${p}help follow\`  — Follow & invite reward commands\n` +
-        `\`${p}help automsg\` — Auto-message & JoinVC commands\n\n` +
+        `\`${p}help mod\`       — Moderation commands\n` +
+        `\`${p}help info\`      — Info & lookup commands\n` +
+        `\`${p}help util\`      — Utility & fun commands\n` +
+        `\`${p}help follow\`    — Follow & invite reward commands\n` +
+        `\`${p}help automsg\`   — Auto-message & JoinVC commands\n` +
+        `\`${p}help blacklist\` — Blacklist system\n\n` +
         "All admin commands require Administrator permission or a configured admin role."
       )
       .setColor(Colors.Blurple)
